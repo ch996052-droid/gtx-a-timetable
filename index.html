@@ -219,6 +219,10 @@
   .geo-row .small { margin-top: 3px; line-height: 1.45; }
   .hint.warn { color: #b3194f; font-weight: 600; }
   .hint[hidden] { display: none; }
+  .inapp { border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--card)); font-size: 14px; }
+  .inapp[hidden] { display: none; }
+  .inapp p { margin: 6px 0 0; line-height: 1.5; }
+  .inapp .small { font-size: 12px; color: var(--muted); }
   .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 60; max-width: min(520px, calc(100% - 28px));
            background: #23202b; color: #fff; padding: 12px 16px; border-radius: 14px; font-size: 14px; font-weight: 600; line-height: 1.45;
            box-shadow: 0 10px 30px rgba(0,0,0,.3); }
@@ -304,6 +308,15 @@
 </header>
 
 <main>
+  <section class="card inapp" id="inappBanner" hidden>
+    <b>⚠️ 카카오톡 안의 브라우저로 열려 있어요</b>
+    <p>카톡 화면을 벗어나면 알림이 멈추고, 위치·진동이 제대로 동작하지 않을 수 있어요. <b>크롬에서 열어</b> 주세요.</p>
+    <div class="row">
+      <a class="btn primary" id="openExternal" href="#">크롬(기본 브라우저)으로 열기</a>
+    </div>
+    <p class="small">안 열리면: 오른쪽 위 메뉴(⋮) → <b>다른 브라우저로 열기</b>. 열린 뒤 크롬 메뉴 → <b>홈 화면에 추가</b>하면 앱처럼 쓸 수 있어요.</p>
+  </section>
+
   <section class="card">
     <div class="seg" id="sectionSeg"></div>
 
@@ -866,10 +879,15 @@ function renderAlarm(now = serviceNow()) {
             <b>수서 ${fmt(alarm.target)} 출발 → 동탄 ${fmt(arr)} 도착</b><br>
             현재: ${where} · 도착까지 <b>${left >= 1 ? Math.floor(left) + "분 " : ""}${String(Math.floor((left % 1) * 60)).padStart(2, "0")}초</b><br>
             <span class="small">${alarm.boarded
-              ? `도착 ${PRE_WARN}분 전 📳 진동 5번 → 도착 시 <b>${prettyPhone(phoneDigits())}</b> 문자`
+              ? `도착 ${PRE_WARN}분 전 📳 진동 5번 → 도착 시 <b>${prettyPhone(phoneDigits())}</b> 문자<br>${
+                  wake.lock ? "🔆 화면 켜짐 유지 중 — 이 페이지를 앞에 띄워 두세요"
+                  : wake.err === "unsupported" ? "⚠️ 이 브라우저는 화면 켜짐 유지를 지원하지 않아요. 화면이 꺼지지 않게 해 주세요."
+                  : wake.err === "denied" ? "⚠️ 화면 켜짐 유지를 못 했어요 (절전 모드?). 화면이 꺼지지 않게 해 주세요."
+                  : "🔆 화면 켜짐 유지 준비 중…"}`
               : `탑승 대기 중 — 탑승하지 않은 열차는 알람·문자가 울리지 않아요. 열차에 타면 <b>[🚆 지금 탄 열차로 탑승]</b>을 누르거나 위치 감지를 켜 두세요.`}</span>`;
   }
   $("alarmStatus").innerHTML = html;
+  syncWakeLock();
   $("boardNow").textContent = alarm.boarded ? "탑승 취소" : "🚆 지금 탄 열차로 탑승";
   $("boardNow").classList.toggle("primary", !alarm.boarded);
   $("smsHint").innerHTML = SMS_CONFIG.endpoint
@@ -1043,7 +1061,9 @@ function firePreAlarm(origin, boarded, test = false) {
   stopRinging();
   if (!canVibrate()) $("popSms").textContent += " ⚠️ 이 기기·브라우저는 진동을 지원하지 않아요 (아이폰 등).";
   buzz(VIBRATE_5);
-  if (!test) notify(`📳 ${PRE_WARN}분 후 동탄역 도착`, `수서 ${fmt(origin)} 출발 열차 · ${fmt(arr)} 도착 예정. 내릴 준비하세요.`);
+  // 시스템 알림 (안드로이드: 서비스 워커 알림 + 진동 5번). 테스트 때도 띄워서 알림이 오는지 확인할 수 있게 함
+  askNotify();
+  notify(`${test ? "[테스트] " : ""}📳 ${PRE_WARN}분 후 동탄역 도착`, `수서 ${fmt(origin)} 출발 열차 · ${fmt(arr)} 도착 예정. 내릴 준비하세요.`, VIBRATE_5);
 }
 function closeModal() { $("modal").hidden = true; stopRinging(); }
 
@@ -1089,11 +1109,43 @@ function stopRinging() {
 function askNotify() {
   if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
 }
-function notify(title, body) {
-  if ("Notification" in window && Notification.permission === "granted") {
-    try { new Notification(title, { body, requireInteraction: true }); } catch (e) {}
+/* ---------- 시스템 알림 ----------
+ * 안드로이드 크롬은 new Notification() 을 막고 서비스 워커 알림만 허용하므로
+ * sw.js 를 등록해 registration.showNotification() 으로 띄웁니다. (https 에서만 동작)
+ */
+let swReg = null;
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  navigator.serviceWorker.register("sw.js").then(r => navigator.serviceWorker.ready).then(r => { swReg = r; }).catch(() => {});
+}
+function notify(title, body, vibrate) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  const opts = { body, requireInteraction: true, tag: "gtxa", renotify: true, vibrate: vibrate || [200, 100, 200] };
+  if (swReg) { swReg.showNotification(title, opts).catch(() => {}); return; }
+  try { new Notification(title, opts); } catch (e) {}
+}
+
+/* ---------- 화면 켜짐 유지 (Wake Lock) ----------
+ * 탑승 처리 중에는 화면이 꺼지지 않게 잡아 둡니다. 화면이 꺼지면 브라우저가 페이지를 멈춰 진동을 놓칠 수 있기 때문.
+ * 다른 앱으로 갔다 돌아오면 자동으로 다시 잡습니다.
+ */
+const wake = { lock: null, pending: false, err: "" };
+async function syncWakeLock() {
+  const want = alarm.on && alarm.boarded && document.visibilityState === "visible";
+  if (!("wakeLock" in navigator)) { wake.err = "unsupported"; return; }
+  if (want && !wake.lock && !wake.pending) {
+    wake.pending = true;
+    try {
+      wake.lock = await navigator.wakeLock.request("screen");
+      wake.err = "";
+      wake.lock.addEventListener("release", () => { wake.lock = null; });
+    } catch (e) { wake.err = "denied"; }
+    wake.pending = false;
+  } else if (!want && wake.lock) {
+    try { await wake.lock.release(); } catch (e) {}
+    wake.lock = null;
   }
 }
+document.addEventListener("visibilitychange", () => { syncWakeLock(); if (document.visibilityState === "visible") live(); });
 let toastTimer = null;
 function toast(msg) {
   const el = $("toast");
@@ -1155,6 +1207,12 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal()
 $("phone").value = prettyPhone(phoneDigits());
 $("phone").addEventListener("input", e => { alarm.phone = e.target.value; store.set("gtxa-phone", phoneDigits()); });
 window.addEventListener("resize", () => live());
+
+// 카카오톡 인앱 브라우저 감지 → 외부 브라우저(크롬)로 열기 안내
+if (/KAKAOTALK/i.test(navigator.userAgent)) {
+  $("inappBanner").hidden = false;
+  $("openExternal").href = "kakaotalk://web/openExternal?url=" + encodeURIComponent(location.href);
+}
 
 // 시작 시 도착 알림 자동 설정 (+ 이전에 켜 둔 경우 위치 감지 재개)
 if (autoArm.on) armNext();
