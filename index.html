@@ -344,9 +344,9 @@
     </div>
     <div class="row">
       <button class="btn primary" id="boardNow">🚆 지금 탄 열차로 탑승</button>
-      <button class="btn" id="alarmTest">알람 테스트 (문자 X)</button>
+      <button class="btn" id="alarmTest">진동 테스트 (문자 X)</button>
     </div>
-    <div class="hint warn" id="soundHint">🔇 브라우저 정책상 화면을 한 번 눌러야 알람 소리가 납니다. 아무 곳이나 한 번 터치해 주세요.</div>
+    <div class="hint warn" id="soundHint">📳 브라우저 정책상 화면을 한 번 눌러야 진동이 울립니다. 아무 곳이나 한 번 터치해 주세요.</div>
     <div class="hint" id="smsHint"></div>
   </section>
 
@@ -845,7 +845,7 @@ function setBoarded(origin) {
   askNotify();
 }
 function clearAlarm() { alarm.on = false; alarm.target = null; alarm.boarded = false; alarm.warned = false; }
-const PRE_WARN = 1; // 하행 동탄역 도착 1분 전에 알람
+const PRE_WARN = 2; // 하행 동탄역 도착 2분 전에 진동 알림
 // 도착 알림 자동 설정: 기본 켜짐, 도착 후 다음 열차로 자동 재설정 (스위치로 끄면 기억)
 const autoArm = { on: store.get("gtxa-alarm", true) };
 function armNext(now = serviceNow()) {
@@ -857,7 +857,7 @@ function renderAlarm(now = serviceNow()) {
   $("alarmSwitch").classList.toggle("on", alarm.on);
   $("alarmSwitch").setAttribute("aria-pressed", alarm.on);
   let html;
-  if (!alarm.on) html = "꺼져 있어요. 켜 두면 <b>내가 탑승한</b> 하행 열차가 <b>동탄역 도착 1분 전</b>에 알람이 울리고, 도착하면 <b>문자</b>를 보내요.";
+  if (!alarm.on) html = "꺼져 있어요. 켜 두면 <b>내가 탑승한</b> 하행 열차가 <b>동탄역 도착 2분 전</b>에 휴대폰이 <b>진동 5번</b>으로 알려주고, 도착하면 <b>문자</b>를 보내요.";
   else if (alarm.target == null) html = "오늘 동탄 방면 운행이 끝났어요.";
   else {
     const arr = alarm.target + DT_LEN, left = arr - now;
@@ -866,7 +866,7 @@ function renderAlarm(now = serviceNow()) {
             <b>수서 ${fmt(alarm.target)} 출발 → 동탄 ${fmt(arr)} 도착</b><br>
             현재: ${where} · 도착까지 <b>${left >= 1 ? Math.floor(left) + "분 " : ""}${String(Math.floor((left % 1) * 60)).padStart(2, "0")}초</b><br>
             <span class="small">${alarm.boarded
-              ? `도착 ${PRE_WARN}분 전 미리 알람 → 도착 시 알람 + <b>${prettyPhone(phoneDigits())}</b> 문자`
+              ? `도착 ${PRE_WARN}분 전 📳 진동 5번 → 도착 시 <b>${prettyPhone(phoneDigits())}</b> 문자`
               : `탑승 대기 중 — 탑승하지 않은 열차는 알람·문자가 울리지 않아요. 열차에 타면 <b>[🚆 지금 탄 열차로 탑승]</b>을 누르거나 위치 감지를 켜 두세요.`}</span>`;
   }
   $("alarmStatus").innerHTML = html;
@@ -875,8 +875,15 @@ function renderAlarm(now = serviceNow()) {
   $("smsHint").innerHTML = SMS_CONFIG.endpoint
     ? `문자는 <b>탑승한 열차</b>가 동탄에 도착할 때만 설정된 서버로 자동 발송됩니다.`
     : `📱 문자는 <b>탑승한 열차</b>가 동탄에 도착할 때만 준비돼요. 자동 발송 서버가 없어서 도착 팝업의 <b>[문자 보내기]</b>를 누르면 휴대폰 문자 앱이 번호·내용이 채워진 채로 열립니다 (휴대폰에서만 동작). 자세한 내용은 <code>요구사항.md</code> 참고.`;
-  const ok = AC && AC.state === "running";
-  $("soundHint").hidden = ok;
+  // 진동 안내: 미지원 기기 / 아직 화면을 한 번도 누르지 않은 경우
+  const touched = navigator.userActivation ? navigator.userActivation.hasBeenActive : !!AC;
+  if (!canVibrate()) {
+    $("soundHint").hidden = false;
+    $("soundHint").textContent = "📵 이 기기·브라우저는 진동을 지원하지 않아요 (아이폰 Safari 등). 화면 팝업과 알림으로만 알려드려요.";
+  } else {
+    $("soundHint").hidden = touched;
+    $("soundHint").textContent = "📳 브라우저 정책상 화면을 한 번 눌러야 진동이 울립니다. 아무 곳이나 한 번 터치해 주세요.";
+  }
   renderGeo();
 }
 
@@ -936,7 +943,7 @@ function onPos(p) {
     if (o != null) {
       setBoarded(o);
       toast(`📍 ${S.stations[geo.last.idx]}역에서 수서 ${fmt(o)} 출발 동탄행 열차 탑승을 감지했어요.`);
-      beep(2);
+      buzz([200]);
       geo.last = null;
     }
   }
@@ -970,7 +977,7 @@ function checkAlarm(now) {
     if (alarm.target == null) alarm.target = pickTarget(now);
     if (alarm.target != null) {
       const arr = alarm.target + DT_LEN;
-      // 도착 1분 전: 울리는 알람 — 내가 탑승한 열차일 때만
+      // 도착 2분 전: 진동 5번 — 내가 탑승한 열차일 때만
       if (alarm.boarded && !alarm.warned && now >= arr - PRE_WARN && now < arr) {
         alarm.warned = true;
         firePreAlarm(alarm.target, alarm.boarded);
@@ -1017,23 +1024,26 @@ async function fireArrival(origin, real, boarded, byGeo = false) {
   const m = $("modal");
   m.hidden = true; void m.offsetWidth; m.hidden = false;
   const pt = $("popTrain"); pt.style.animation = "none"; void pt.offsetWidth; pt.style.animation = "";
-  stopRinging(); beep(3); buzz([200, 100, 200]);
+  stopRinging(); buzz([200, 100, 200]);   // 소리 없이 짧은 진동
   if (real) notify("🚄 GTX-A 동탄역 도착", boarded ? text : `수서 ${fmt(origin)} 출발 열차가 동탄역에 도착했어요.`);
 }
 
-// 하행 동탄역 도착 1분 전 알람 (울림 + 진동 + 팝업, [알람 끄기] 누를 때까지 최대 1분)
+// 하행 동탄역 도착 2분 전 알림: 소리 없이 진동만 5번 + 팝업
+const VIBRATE_5 = [600, 400, 600, 400, 600, 400, 600, 400, 600];
 function firePreAlarm(origin, boarded, test = false) {
   const arr = origin + DT_LEN;
-  $("popTitle").textContent = `⏰ ${PRE_WARN}분 후 동탄역 도착`;
+  $("popTitle").textContent = `📳 ${PRE_WARN}분 후 동탄역 도착`;
   $("popText").innerHTML = `${boarded ? "탑승하신 " : ""}수서 ${fmt(origin)} 출발 하행 열차가<br><b>${fmt(arr)}</b> 동탄역에 도착해요.<br>🧳 내릴 준비하세요!`;
   $("popSms").textContent = test ? "테스트 알람이에요. 문자는 보내지 않아요."
     : boarded ? `도착하면 ${prettyPhone(phoneDigits())} 로 보낼 문자를 준비할게요.` : "탑승 처리 전이라 문자는 보내지 않아요.";
-  $("popActions").innerHTML = `<button class="btn primary" data-close>알람 끄기</button>`;
+  $("popActions").innerHTML = `<button class="btn primary" data-close>확인</button>`;
   const m = $("modal");
   m.hidden = true; void m.offsetWidth; m.hidden = false;
   const pt = $("popTrain"); pt.style.animation = "none"; void pt.offsetWidth; pt.style.animation = "";
-  startRinging();
-  if (!test) notify(`⏰ ${PRE_WARN}분 후 동탄역 도착`, `수서 ${fmt(origin)} 출발 열차 · ${fmt(arr)} 도착 예정. 내릴 준비하세요.`);
+  stopRinging();
+  if (!canVibrate()) $("popSms").textContent += " ⚠️ 이 기기·브라우저는 진동을 지원하지 않아요 (아이폰 등).";
+  buzz(VIBRATE_5);
+  if (!test) notify(`📳 ${PRE_WARN}분 후 동탄역 도착`, `수서 ${fmt(origin)} 출발 열차 · ${fmt(arr)} 도착 예정. 내릴 준비하세요.`);
 }
 function closeModal() { $("modal").hidden = true; stopRinging(); }
 
@@ -1063,7 +1073,8 @@ function beep(n = 3) {
     o.start(t); o.stop(t + .2);
   }
 }
-const buzz = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
+const canVibrate = () => typeof navigator.vibrate === "function";
+const buzz = p => { try { canVibrate() && navigator.vibrate(p); } catch (e) {} };
 let ringTimer = null, ringStop = null;
 function startRinging() {
   stopRinging();
